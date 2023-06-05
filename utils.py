@@ -3,6 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torchvision.datasets as datasets
 import torchvision.transforms as T
+from torch.distributions.binomial import Binomial
+from torch.distributions.uniform import Uniform
 
 from concrete_autoencoder import ConcreteAutoEncoder
 
@@ -13,10 +15,20 @@ def load_model(file_nm, input_dim, k, alpha=0.99999, decoder_type='mlp'):
     return model
 
 
+def mask_features(row):
+    missing_prob = Uniform(0.4, 0.6).sample(row.shape)
+    mask = Binomial(1, missing_prob).sample()
+    return row*mask
+
+
 def load_dataset(dataset, train=True, download=True):
     if dataset == 'mnist':
         dt = datasets.MNIST(root='./data', download=download, train=train,
                             transform=T.Compose([T.ToTensor(), T.Lambda(lambda x: torch.flatten(x))]))
+        input_dim = 28*28
+    elif dataset == 'mnist_partial':
+        dt = datasets.MNIST(root='./data', download=download, train=train,
+                            transform=T.Compose([T.ToTensor(), T.Lambda(lambda x: mask_features(torch.flatten(x)))]))
         input_dim = 28*28
     else:
         raise ValueError(f'Unsupported dataset {dataset}')

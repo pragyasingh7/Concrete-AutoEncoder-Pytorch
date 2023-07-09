@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 
 class ConcreteEncoder(nn.Module):
-    def __init__(self, input_dim, output_dim, start_temp=10.0, min_temp=0.1, alpha=0.99999):
+    def __init__(self, input_dim, output_dim, start_temp=10.0, min_temp=0.01, alpha=0.99999):
         super().__init__()
         self.start_temp = start_temp
         self.min_temp = min_temp
@@ -14,7 +14,7 @@ class ConcreteEncoder(nn.Module):
         self.logits = nn.Parameter(torch.empty(output_dim, input_dim))
         nn.init.xavier_normal_(self.logits)
 
-    def forward(self, X, train=True, X_mask=None):
+    def forward(self, X, train=True, X_mask=None, debug=False):
         uniform = torch.rand(self.logits.shape).clamp(min=1e-7)
         gumbel = -torch.log(-torch.log(uniform))
         self.temp = max([self.temp * self.alpha, self.min_temp])
@@ -33,6 +33,9 @@ class ConcreteEncoder(nn.Module):
         selection = samples if train else discrete_logits
 
         Y = torch.matmul(X, torch.transpose(selection, -1, -2))
+
+        if debug:
+            return X, selection
 
         return Y
 
@@ -56,7 +59,7 @@ class Decoder(nn.Module):
 
 
 class ConcreteAutoEncoder(nn.Module):
-    def __init__(self, input_dim, k, start_temp=10.0, min_temp=0.1, alpha=0.99999, decoder_type='lr'):
+    def __init__(self, input_dim, k, start_temp=10.0, min_temp=0.01, alpha=0.99999, decoder_type='lr'):
         super().__init__()
         self.encoder = ConcreteEncoder(input_dim, k, start_temp=start_temp, min_temp=min_temp, alpha=alpha)
         self.decoder = Decoder(decoder_type, k, input_dim)
@@ -70,8 +73,8 @@ class ConcreteAutoEncoder(nn.Module):
     def get_indices(self):
         return torch.argmax(self.encoder.logits, dim=-1)
 
-    def forward(self, X, train=True, X_mask=None):
-        selected_features = self.encoder(X, train=train, X_mask=X_mask)
+    def forward(self, X, train=True, X_mask=None, debug=False):
+        selected_features = self.encoder(X, train=train, X_mask=X_mask, debug=debug)
         outputs = self.decoder(selected_features)
         if train and X_mask is not None:
             outputs *= X_mask

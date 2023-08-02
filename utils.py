@@ -76,3 +76,22 @@ def plot_performance(losses, folder='./data/figures/', tag=''):
     ax.legend()
     ax.grid()
     plt.savefig(f'{folder}/performance{tag}.png')
+
+
+def plot_annealing_schedule(df, folder='./data/figures/', tag=''):
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+    fig, ax = plt.subplots()
+    axes = [ax, ax.twinx(), ax.twinx()]
+    fig.subplots_adjust(right=0.75)
+    axes[-1].spines['right'].set_position(('axes', 1.2))
+    axes[-1].set_frame_on(True)
+    axes[-1].patch.set_visible(False)
+
+    colors = ('Green', 'Red', 'Blue')
+    for ax, color, key in zip(axes, colors, list(df.keys())):
+        ax.plot(df[key], color=color)
+        ax.set_ylabel(key, color=color)
+        ax.tick_params(axis='y', colors=color)
+    axes[0].set_xlabel('Number of epochs')
+    plt.savefig(f'{folder}/annealing{tag}.png')

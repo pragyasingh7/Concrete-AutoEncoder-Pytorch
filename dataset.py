@@ -2,13 +2,15 @@ import codecs
 import sys
 import os
 import numpy as np
+from abc import ABC, abstractmethod
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from torch.distributions.binomial import Binomial
 from torch.distributions.uniform import Uniform
 
 
-class MNIST(Dataset):
+class BaseDataset(ABC, Dataset):
     def __init__(self, train=False, missing_data=False):
         super().__init__()
         self.train = train
@@ -16,6 +18,76 @@ class MNIST(Dataset):
 
         self.data_mask = None
         self.data, self.targets = self._load_data()
+
+
+    @abstractmethod
+    def _load_data(self):
+        return NotImplementedError
+
+
+    @abstractmethod
+    def _transform(self):
+        return NotImplementedError
+
+
+    def _mask_features(self, x):
+        missing_prob = Uniform(0.4, 0.6).sample(x.shape)
+        mask = Binomial(1, missing_prob).sample()
+        return x, mask
+
+
+    def __len__(self):
+        return len(self.data)
+
+
+    def __getitem__(self, index):
+        img, target = self.data[index], int(self.targets[index])
+        if self.missing_data:
+            img_mask = self.data_mask[index]
+            return [img, img_mask], target
+        return img, target
+
+
+class Superconductivity(BaseDataset):
+    def __init__(self, train=False, missing_data=False):
+        super().__init__(train=train, missing_data=missing_data)
+
+
+    def _load_data(self, train_ratio=0.8):
+        data = pd.read_csv('./data/superconductivty+data/train.csv')
+        n_samples = data.shape[0]
+
+        # Setting local seed for same train-test split
+        indices = list(range(n_samples))
+        rng = np.random.default_rng(99)
+        rng.shuffle(indices)
+
+        train_idx, test_idx = indices[:int(train_ratio*n_samples)], indices[int(train_ratio*n_samples):]
+        data = data.iloc[train_idx if self.train else test_idx]
+
+        targets = data['critical_temp'].to_numpy()
+        data = data.drop('critical_temp', axis=1)
+
+        return self._transform(data), targets
+
+
+    def _transform(self, data):
+        n_features = data.shape[1]
+        data = torch.tensor(data.to_numpy(), dtype=torch.get_default_dtype())
+        # Apply min-max scaling
+        data = (data - torch.min(data, 0).values) / (torch.max(data, 0).values - torch.min(data, 0).values)
+        data = data.reshape((-1, 1, n_features))
+
+        if self.missing_data:
+            _, self.data_mask = self._mask_features(data)
+
+        return data
+
+
+class MNIST(BaseDataset):
+    def __init__(self, train=False, missing_data=False):
+        super().__init__(train=train, missing_data=missing_data)
+
 
     def _load_data(self):
         image_file = f"{'train' if self.train else 't10k'}-images-idx3-ubyte"
@@ -27,6 +99,7 @@ class MNIST(Dataset):
 
         return data, targets
 
+
     def _transform(self, data):
         data = data.to(torch.get_default_dtype()).div(255)
         data = data.reshape((-1, 1, 28 * 28))
@@ -35,22 +108,6 @@ class MNIST(Dataset):
             _, self.data_mask = self._mask_features(data)
 
         return data
-
-    def _mask_features(self, x):
-        missing_prob = Uniform(0.4, 0.6).sample(x.shape)
-        mask = Binomial(1, missing_prob).sample()
-
-        return x, mask
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, index):
-        img, target = self.data[index], int(self.targets[index])
-        if self.missing_data:
-            img_mask = self.data_mask[index]
-            return [img, img_mask], target
-        return img, target
 
 
 # ----------------------------------------------------------

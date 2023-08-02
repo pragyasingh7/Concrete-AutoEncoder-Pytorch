@@ -5,17 +5,19 @@ import torch
 from torch.utils.data import DataLoader, SubsetRandomSampler
 
 from utils import *
-from dataset import MNIST
+from dataset import MNIST, Superconductivity
 from concrete_autoencoder import ConcreteAutoEncoder
 
 
 # ----------------------------------------------------------
 # Constants
 # ----------------------------------------------------------
-DATASET = 'mnist'
+DATASET = 'super'
 MISSING_DATA = True
-DATA_IMPUTATION = None
-NUM_TRYOUTS = 3
+DATA_IMPUTATION = 'mean'
+BATCH_ADJUST = False
+SUFFIX = ""
+NUM_TRYOUTS = 4
 START_TEMP = 10.0
 MIN_TEMP = 0.01
 MEAN_MAX_TARGET = 0.998
@@ -23,7 +25,7 @@ BATCH_SIZE = 64
 DECODER_TYPE = 'lr'
 LEARNING_RATE = 1e-3
 
-k = 50
+k = 20
 num_epochs = 100
 
 IS_SPARSE = True if MISSING_DATA and DATA_IMPUTATION is None else False
@@ -35,23 +37,28 @@ IS_SPARSE = True if MISSING_DATA and DATA_IMPUTATION is None else False
 if DATASET == 'mnist':
     input_dim = 28*28
     trainset = MNIST(train=True, missing_data=MISSING_DATA)
-
-    indices = list(range(len(trainset)))
-    np.random.shuffle(indices)
-    train_idx, val_idx = indices[:50000], indices[50000:]
-    train_sampler, val_sampler = SubsetRandomSampler(train_idx), SubsetRandomSampler(val_idx)
-
-    train_dataloader = DataLoader(trainset, sampler=train_sampler, batch_size=BATCH_SIZE)
-    val_dataloader = DataLoader(trainset, sampler=val_sampler, batch_size=len(val_idx))
-
-    masked_mean = None
-    if MISSING_DATA and DATA_IMPUTATION == 'mean':
-        masked_mean = train_masked_mean(trainset, train_idx)
-
     testset = MNIST(train=False, missing_data=MISSING_DATA)
-    X_test, X_mask_test = testset.data, testset.data_mask
+elif DATASET == 'super':
+    input_dim = 81
+    trainset = Superconductivity(train=True, missing_data=MISSING_DATA)
+    testset = Superconductivity(train=False, missing_data=MISSING_DATA)
 else:
     raise ValueError(f'Unsupported dataset {DATASET}')
+
+indices = list(range(len(trainset)))
+n_train_samples = int(0.8 * len(trainset))
+np.random.shuffle(indices)
+train_idx, val_idx = indices[:n_train_samples], indices[n_train_samples:]
+train_sampler, val_sampler = SubsetRandomSampler(train_idx), SubsetRandomSampler(val_idx)
+
+train_dataloader = DataLoader(trainset, sampler=train_sampler, batch_size=BATCH_SIZE)
+val_dataloader = DataLoader(trainset, sampler=val_sampler, batch_size=len(val_idx))
+
+masked_mean = None
+if MISSING_DATA and DATA_IMPUTATION == 'mean':
+    masked_mean = train_masked_mean(trainset, train_idx)
+
+X_test, X_mask_test = testset.data, testset.data_mask
 
 
 # ----------------------------------------------------------
@@ -62,8 +69,10 @@ for i in range(NUM_TRYOUTS):
     model = ConcreteAutoEncoder(input_dim, k, start_temp=START_TEMP, min_temp=MIN_TEMP, alpha=alpha,
                                 decoder_type=DECODER_TYPE)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    criterion = torch.nn.MSELoss(reduction='sum')
+    train_criterion = torch.nn.MSELoss(reduction='none' if BATCH_ADJUST else 'sum')
+    eval_criterion = torch.nn.MSELoss(reduction='sum')
     losses = {'train': [], 'complete_val': [], 'sparse_val': []}
+    annealing_schedule = {'temp': [], 'complete val loss': [], 'mean-max alpha': []}
 
     for j in range(num_epochs):
         epoch_loss = 0
@@ -81,7 +90,15 @@ for i in range(NUM_TRYOUTS):
                 loss_multiplier = 1 / torch.numel(X)
 
             output = model(X, X_mask=X_mask)
-            loss = criterion(output, X) * loss_multiplier
+
+            if BATCH_ADJUST:
+                r = torch.div(BATCH_SIZE, torch.sum(X_mask, dim=0) + 1e-7)
+                loss = torch.sum(r * train_criterion(output, X)) * loss_multiplier
+                # r = torch.div(1, torch.sum(X_mask, dim=0) + 1e-7)
+                # loss = torch.sum(r * train_criterion(output, X))
+            else:
+                loss = train_criterion(output, X) * loss_multiplier
+
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
@@ -106,13 +123,17 @@ for i in range(NUM_TRYOUTS):
                 val_output = model(X, train=False, X_mask=None)
 
             loss_multiplier = 1 / torch.numel(X)
-            complete_val_loss = criterion(val_output, X) * loss_multiplier
+            complete_val_loss = eval_criterion(val_output, X) * loss_multiplier
             print(f'Complete val loss for epoch {j}: {complete_val_loss}')
             losses['complete_val'].append(complete_val_loss.item())
 
+            annealing_schedule['complete val loss'].append(complete_val_loss.item())
+            annealing_schedule['temp'].append(model.encoder.temp)
+            annealing_schedule['mean-max alpha'].append(model.get_mean_max().detach().numpy())
+
             if MISSING_DATA:
                 loss_multiplier = 1 / torch.sum(X_mask)
-                sparse_val_loss = criterion(val_output * X_mask, X * X_mask) * loss_multiplier
+                sparse_val_loss = eval_criterion(val_output * X_mask, X * X_mask) * loss_multiplier
                 print(f'Sparse val loss for epoch {j}: {sparse_val_loss}')
                 losses['sparse_val'].append(sparse_val_loss.item())
 
@@ -130,18 +151,17 @@ for i in range(NUM_TRYOUTS):
         test_output = model(X_test, train=False, X_mask=None)
 
     loss_multiplier = 1 / torch.numel(X_test)
-    complete_test_loss = criterion(test_output, X_test) * loss_multiplier
+    complete_test_loss = eval_criterion(test_output, X_test) * loss_multiplier
     print('---------------------------------------------------------')
     print(f'Complete test loss for tryout {i}: {complete_test_loss}')
 
     if MISSING_DATA:
         loss_multiplier = 1 / torch.sum(X_mask_test)
-        sparse_test_loss = criterion(test_output * X_mask_test, X_test * X_mask_test) * loss_multiplier
-        print(f'Sparse val loss for tryout {i}: {sparse_test_loss}')
-        losses['sparse_val'].append(sparse_test_loss.item())
+        sparse_test_loss = eval_criterion(test_output * X_mask_test, X_test * X_mask_test) * loss_multiplier
+        print(f'Sparse test loss for tryout {i}: {sparse_test_loss}')
 
     # --- Save model ---
-    tag = f'{DECODER_TYPE}{"_missing" if MISSING_DATA else ""}{"" if DATA_IMPUTATION is None else "_"+DATA_IMPUTATION}_k{k}b{BATCH_SIZE}e{num_epochs}'
+    tag = f'{DECODER_TYPE}{"_missing" if MISSING_DATA else ""}{"" if DATA_IMPUTATION is None else "_"+DATA_IMPUTATION}{"_adj" if BATCH_ADJUST else ""}_k{k}b{BATCH_SIZE}e{num_epochs}{SUFFIX}'
 
     if not os.path.exists(f'./data/saved_models/{DATASET}'):
         os.makedirs(f'./data/saved_models/{DATASET}')
@@ -165,6 +185,8 @@ for i in range(NUM_TRYOUTS):
                              tag=f'_{tag}')
 
     plot_performance(losses, folder=f'./data/figures/{DATASET}', tag=f'_{tag}')
+
+    plot_annealing_schedule(annealing_schedule, folder=f'./data/figures/{DATASET}', tag=f'_{tag}')
 
     # --- Check if num_epochs need to be increased ---
     if model.get_mean_max() >= MEAN_MAX_TARGET:
